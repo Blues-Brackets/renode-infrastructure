@@ -57,10 +57,15 @@ namespace Antmicro.Renode.Peripherals.Wireless
             var headerLengthInAir = HeaderLengthInAir();
             var headerLengthInRAM = HeaderLengthInRAM();
 
+            var processedFrame = new byte[frame.Length];
+            Array.Copy(frame, processedFrame, frame.Length);
+
+            var payloadLength = Math.Min(processedFrame[addressLength + (int)s0Length.Value], (byte)maxPacketLength.Value);
+            ApplyEndianness(processedFrame, 0, addressLength + headerLengthInAir + payloadLength);
+
             var dataAddress = (uint)packetPointer.Value;
-            sysbus.WriteBytes(frame, address: dataAddress, startingIndex: addressLength, count: headerLengthInRAM);
-            var payloadLength = Math.Min(frame[addressLength + (int)s0Length.Value], (byte)maxPacketLength.Value);
-            sysbus.WriteBytes(frame, address: (ulong)(dataAddress + headerLengthInRAM), startingIndex: addressLength + headerLengthInAir, count: payloadLength);
+            sysbus.WriteBytes(processedFrame, address: dataAddress, startingIndex: addressLength, count: headerLengthInRAM);
+            sysbus.WriteBytes(processedFrame, address: (ulong)(dataAddress + headerLengthInRAM), startingIndex: addressLength + headerLengthInAir, count: payloadLength);
 
             var crcLen = 4;
             ScheduleRadioEvents((uint)(headerLengthInAir + payloadLength + crcLen));
@@ -219,7 +224,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 .WithValueField(8, 8, out staticLength, name: "STATLEN")
                 .WithValueField(16, 3, out baseAddressLength, name: "BALEN")
                 .WithReservedBits(19, 5)
-                .WithTaggedFlag("ENDIAN", 24)
+                .WithFlag(24, out endian, name: "ENDIAN")
                 .WithTaggedFlag("WHITEEN", 25)
                 .WithReservedBits(26, 6)
             ;
@@ -443,6 +448,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
             sysbus.ReadBytes((ulong)(dataAddress + headerLengthInRAM), payloadLength, data, addressLength + headerLengthInAir);
             this.Log(LogLevel.Noisy, "Data: {0} Maxlen {1} statlen {2}", Misc.PrettyPrintCollectionHex(data), maxPacketLength.Value, staticLength.Value);
 
+            ApplyEndianness(data, 0, addressLength + headerLengthInAir + payloadLength);
+
             FrameSent?.Invoke(this, data);
 
             var crcLen = 4;
@@ -532,6 +539,32 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             data[startIndex + i] = addressPrefixes[logicalAddress];
         }
+
+        private void ApplyEndianness(byte[] data, int startIndex, int length)
+        {
+            // ENDIAN = 0: Little endian (LSB first) - no conversion needed as this is the default
+            // ENDIAN = 1: Big endian (MSB first) - reverse bit order within each byte
+            if(endian.Value)
+            {
+                for(int i = startIndex; i < startIndex + length; i++)
+                {
+                    data[i] = ReverseBitsInByte(data[i]);
+                }
+            }
+        }
+
+        private static byte ReverseBitsInByte(byte input)
+        {
+            byte result = 0;
+            for(int i = 0; i < 8; i++)
+            {
+                if((input & (1 << i)) != 0)
+                {
+                    result |= (byte)(1 << (7 - i));
+                }
+            }
+            return result;
+        }
         
         private const int DefaultRSSISample = 10;
 
@@ -568,6 +601,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IValueRegisterField crcInitialValue;
         private IEnumRegisterField<CCAMode> ccaMode;
         private IFlagRegisterField powerOn;
+        private IFlagRegisterField endian;
         
         private readonly Dictionary<uint, int> bluetoothLEChannelMap = new Dictionary<uint, int>()
         {
